@@ -1,0 +1,321 @@
+/* Directmail — webmail layout for the terminal */
+
+Screen {
+    background: #0f1419;
+    color: #e7ecf1;
+}
+
+Header {
+    background: #1a2332;
+    color: #e7ecf1;
+    text-style: bold;
+}
+
+Footer {
+    background: #1a2332;
+}
+
+#main {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#folders {
+    width: 18;
+    min-width: 14;
+    background: #15202b;
+    border-right: solid #2a3a4a;
+    padding: 1 0;
+}
+
+#folders ListView {
+    height: 1fr;
+    background: #15202b;
+}
+
+#folders ListItem {
+    padding: 0 1;
+}
+
+#folders ListItem.--highlight {
+    background: #1e3a5f;
+}
+
+#message-pane {
+    width: 2fr;
+    min-width: 30;
+    border-right: solid #2a3a4a;
+}
+
+#message-table {
+    height: 1fr;
+}
+
+#reading-pane {
+    width: 3fr;
+    padding: 0 1;
+    background: #0f1419;
+}
+
+#reading-header {
+    height: auto;
+    padding: 1 1 0 1;
+    color: #8b9bab;
+    text-style: bold;
+}
+
+#reading-body {
+    height: 1fr;
+    padding: 1;
+    background: #121820;
+    border: solid #2a3a4a;
+    overflow-y: auto;
+}
+
+/* Auth / modal screens */
+#auth-box {
+    width: 60;
+    height: auto;
+    border: tall #3d7ea6;
+    background: #15202b;
+    padding: 1 2;
+    margin: 2 4;
+}
+
+#auth-box Label {
+    margin-bottom: 1;
+}
+
+#auth-box Input {
+    margin-bottom: 1;
+}
+
+#auth-box Button {
+    margin: 1 1 0 0;
+}
+
+/* Compose — full sheet like webmail */
+ComposeScreen {
+    align: center middle;
+    background: #0a0e14 70%;
+}
+
+#compose-sheet {
+    width: 92%;
+    height: 90%;
+    max-width: 120;
+    background: #121820;
+    border: tall #3d7ea6;
+    padding: 0;
+}
+
+#compose-toolbar {
+    height: 3;
+    width: 100%;
+    background: #1a2332;
+    padding: 0 1;
+    align: left middle;
+}
+
+#compose-title {
+    width: auto;
+    text-style: bold;
+    color: #e7ecf1;
+    padding: 0 1 0 0;
+}
+
+#compose-meta {
+    width: 1fr;
+    color: #6b7c8c;
+    text-style: italic;
+}
+
+#compose-actions {
+    width: auto;
+    height: auto;
+    align: right middle;
+}
+
+#compose-actions Button {
+    margin-left: 1;
+}
+
+#compose-to-row {
+    height: 3;
+    width: 100%;
+    padding: 0 1;
+    align: left middle;
+    background: #15202b;
+    border-bottom: solid #2a3a4a;
+}
+
+#compose-to-label {
+    width: 4;
+    color: #8b9bab;
+    text-style: bold;
+    content-align: center middle;
+}
+
+#compose-to-row Input {
+    width: 1fr;
+    background: #0f1419;
+    border: tall #2a3a4a;
+}
+
+#compose-picker-hint {
+    height: 1;
+    color: #6b7c8c;
+    padding: 0 2;
+    background: #15202b;
+}
+
+#compose-picker {
+    height: 7;
+    max-height: 9;
+    background: #0f1419;
+    border-bottom: solid #2a3a4a;
+    padding: 0 1;
+}
+
+#compose-picker:focus {
+    background: #15202b;
+}
+
+#compose-body-label {
+    height: 1;
+    color: #8b9bab;
+    text-style: bold;
+    padding: 0 2;
+    background: #15202b;
+}
+
+#compose-sheet #body {
+    height: 1fr;
+    margin: 0;
+    padding: 1 2;
+    background: #0f1419;
+    border: none;
+}
+
+#compose-sheet #body:focus {
+    background: #0f1419;
+}
+
+#contacts-box {
+    width: 80%;
+    height: 80%;
+    border: tall #3d7ea6;
+    background: #15202b;
+    padding: 1 2;
+}
+
+/* Contacts — copy / paste cards */
+ContactsScreen {
+    align: center middle;
+    background: #0a0e14 70%;
+}
+
+#contacts-sheet {
+    width: 92%;
+    height: 88%;
+    max-width: 120;
+    background: #121820;
+    border: tall #3d7ea6;
+    padding: 0;
+}
+
+#contacts-toolbar {
+    height: 3;
+    background: #1a2332;
+    padding: 0 1;
+    align: left middle;
+}
+
+#contacts-title {
+    text-style: bold;
+    width: auto;
+    padding-right: 1;
+}
+
+#contacts-meta {
+    width: 1fr;
+    color: #6b7c8c;
+}
+
+#contacts-share {
+    height: auto;
+    padding: 1 2 0 2;
+    background: #15202b;
+    border-bottom: solid #2a3a4a;
+}
+
+#contacts-share Label {
+    color: #8b9bab;
+    margin-bottom: 0;
+}
+
+#contacts-share .card-field {
+    width: 100%;
+    background: #0f1419;
+    border: tall #2a3a4a;
+    color: #c5d4e0;
+}
+
+#contacts-share-actions {
+    height: 3;
+    align: left middle;
+    padding-top: 0;
+}
+
+#contacts-share-actions Button {
+    margin-right: 1;
+}
+
+#contacts-share-actions .fp {
+    color: #6b7c8c;
+    width: 1fr;
+}
+
+#contacts-import {
+    height: auto;
+    max-height: 14;
+    padding: 1 2;
+    background: #15202b;
+    border-bottom: solid #2a3a4a;
+}
+
+#contacts-import Label {
+    color: #8b9bab;
+}
+
+#contacts-import #card-input {
+    height: 5;
+    background: #0f1419;
+    border: tall #3d7ea6;
+    margin: 1 0;
+    padding: 0 1;
+}
+
+#contacts-import-actions Button {
+    margin-right: 1;
+}
+
+#contacts-sheet #contact-list {
+    height: 1fr;
+    background: #0f1419;
+    padding: 0 1;
+}
+
+#contacts-sheet > Label {
+    padding: 0 2;
+    color: #8b9bab;
+    background: #15202b;
+}
+
+#status-bar {
+    dock: bottom;
+    height: 1;
+    background: #1a2332;
+    color: #8b9bab;
+    padding: 0 1;
+}
