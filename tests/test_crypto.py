@@ -47,6 +47,19 @@ def test_contact_card_roundtrip():
     assert pubkey == keys.public_key_bytes
 
 
+def test_contact_card_local_path_and_messy_paste():
+    keys = generate_identity_keypair()
+    ipns = "local:///home/sam/.local/share/directmail/mailbox/outbox.json"
+    card = encode_card(handle="a@b", ipns=ipns, pubkey=keys.public_key_bytes)
+    assert decode_card(card)[1] == ipns
+    assert decode_card(f"hey\n{card}\n")[2] == keys.public_key_bytes
+    try:
+        decode_card(card[:-1])
+        assert False, "truncated should fail"
+    except Exception as exc:
+        assert "truncated" in str(exc).lower()
+
+
 def test_keystore_wrong_passphrase(tmp_path):
     keys = generate_identity_keypair()
     ks = Keystore(tmp_path / "ks")

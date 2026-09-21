@@ -26,6 +26,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from directmail.cards import CardError, card_summary, encode_card
+from directmail.clipboard import copy_text, read_via_system
 from directmail.keystore import KeystoreAuthError
 from directmail.mail import MailService, default_handle
 from directmail.models import Folder, Message
@@ -225,6 +226,7 @@ class ContactsScreen(ModalScreen[None]):
         Binding("escape", "close", "Close"),
         Binding("y", "copy_mine", "Copy my card"),
         Binding("ctrl+y", "copy_mine", "Copy my card", show=False),
+        Binding("ctrl+s", "add", "Save contact"),
     ]
 
     def __init__(self, mail: MailService) -> None:
@@ -237,42 +239,50 @@ class ContactsScreen(ModalScreen[None]):
         with Vertical(id="contacts-sheet"):
             with Horizontal(id="contacts-toolbar"):
                 yield Label("Contacts", id="contacts-title")
-                yield Static("  y copy yours  ·  paste theirs below", id="contacts-meta")
+                yield Static("  y = copy yours", id="contacts-meta")
                 yield Button("Close  Esc", id="close", compact=True)
             with Vertical(id="contacts-share"):
-                yield Label("Your card — give this to people once")
-                yield Input(id="my-card", classes="card-field")
+                yield Label("Your card — Copy my card, then send it to your peer")
+                yield TextArea(id="my-card", classes="card-field")
                 with Horizontal(id="contacts-share-actions"):
                     yield Button("Copy my card", variant="primary", id="copy-mine", compact=True)
                     yield Static(id="my-fp", classes="fp")
             with Vertical(id="contacts-import"):
-                yield Label("Add someone — paste their card here")
+                yield Label("Add someone — paste their dm:v1:… card below")
                 yield TextArea(id="card-input")
                 with Horizontal(id="contacts-import-actions"):
-                    yield Button("Add contact", variant="primary", id="add", compact=True)
+                    yield Button(
+                        "Save contact",
+                        variant="success",
+                        id="add",
+                        compact=True,
+                    )
                     yield Button("Clear", id="clear-paste", compact=True)
+                    yield Static("  Ctrl+S also saves", classes="hint")
             yield Label("Address book — Enter copies their card")
             yield OptionList(id="contact-list")
             yield Footer()
 
     def on_mount(self) -> None:
+        mine = self.query_one("#my-card", TextArea)
+        mine.show_line_numbers = False
+        mine.read_only = True
         paste = self.query_one("#card-input", TextArea)
         paste.show_line_numbers = False
         self._refresh()
-        # Ready to receive a paste; your card is one key away (y)
         paste.focus()
 
     def _refresh(self) -> None:
-        my_input = self.query_one("#my-card", Input)
+        mine = self.query_one("#my-card", TextArea)
         try:
             self._my_card = self.mail.my_card()
-            my_input.value = self._my_card
+            mine.load_text(self._my_card)
             self.query_one("#my-fp", Static).update(
                 f"fingerprint  {self.mail.my_fingerprint()}"
             )
         except Exception as exc:
             self._my_card = ""
-            my_input.value = str(exc)
+            mine.load_text(str(exc))
             self.query_one("#my-fp", Static).update("")
 
         picker = self.query_one("#contact-list", OptionList)
@@ -293,25 +303,38 @@ class ContactsScreen(ModalScreen[None]):
         if not self._my_card:
             self.notify("No card to copy", severity="error")
             return
-        self.app.copy_to_clipboard(self._my_card)
-        # Keep Input selected-friendly for terminals without OSC 52
-        field = self.query_one("#my-card", Input)
-        field.value = self._my_card
-        field.focus()
-        self.notify("Your card copied — paste it to your peer")
+        ok = copy_text(self.app, self._my_card)
+        mine = self.query_one("#my-card", TextArea)
+        mine.load_text(self._my_card)
+        mine.focus()
+        try:
+            mine.action_select_all()
+        except Exception:  # noqa: BLE001
+            pass
+        if ok:
+            self.notify("Your card copied — paste it to your peer")
+        else:
+            self.notify(
+                "Clipboard blocked — card selected; use Ctrl+Shift+C (or Cmd+C)",
+                severity="warning",
+            )
 
     @on(Button.Pressed, "#copy-mine")
     def copy_mine_btn(self) -> None:
         self.action_copy_mine()
 
     def action_add(self) -> None:
-        # Prefer paste box; fall back to app clipboard (after Copy my card / OSC52)
+        # Prefer paste box; fall back to OS / Textual clipboard
         paste = self.query_one("#card-input", TextArea)
         card = paste.text.strip()
         if not card:
             clip = (self.app.clipboard or "").strip()
             if clip.startswith("dm:v1:"):
                 card = clip
+        if not card:
+            sys_clip = (read_via_system() or "").strip()
+            if sys_clip.startswith("dm:v1:"):
+                card = sys_clip
         if not card:
             self.notify("Paste a contact card first", severity="error")
             paste.focus()
@@ -343,8 +366,14 @@ class ContactsScreen(ModalScreen[None]):
         card = self._contact_cards.get(handle)
         if not card:
             return
-        self.app.copy_to_clipboard(card)
-        self.notify(f"Copied {handle}'s card")
+        ok = copy_text(self.app, card)
+        if ok:
+            self.notify(f"Copied {handle}'s card")
+        else:
+            self.notify(
+                f"Could not reach clipboard — card for {handle} is in app memory; paste via Add",
+                severity="warning",
+            )
 
     @on(Button.Pressed, "#close")
     def close_btn(self) -> None:
