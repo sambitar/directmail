@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import uuid
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -38,6 +40,7 @@ class IpfsClient:
         params: dict[str, Any] | None = None,
         data: bytes | None = None,
         content_type: str | None = None,
+        timeout: float | None = None,
     ) -> bytes:
         qs = f"?{urlencode(params)}" if params else ""
         url = f"{self.api_url}/api/v0/{path.lstrip('/')}{qs}"
@@ -46,7 +49,7 @@ class IpfsClient:
             headers["Content-Type"] = content_type
         req = Request(url, data=data if data is not None else b"", headers=headers, method="POST")
         try:
-            with urlopen(req, timeout=self.timeout) as resp:
+            with urlopen(req, timeout=self.timeout if timeout is None else timeout) as resp:
                 return resp.read()
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -71,7 +74,7 @@ class IpfsClient:
             return False
 
     def id(self) -> dict[str, Any]:
-        return self._post_json("id")
+        return self._post_json("id", timeout=5.0)
 
     def add_bytes(self, data: bytes, *, filename: str = "blob", pin: bool = True) -> str:
         boundary = "----directmailboundary7MA4YWxkTrZu0gW"
@@ -85,6 +88,7 @@ class IpfsClient:
             params={"pin": str(pin).lower(), "cid-version": "1"},
             data=body,
             content_type=f"multipart/form-data; boundary={boundary}",
+            timeout=120.0,
         )
         line = raw.decode("utf-8").strip().splitlines()[-1]
         result = json.loads(line)
@@ -94,17 +98,19 @@ class IpfsClient:
         return cid
 
     def cat(self, cid: str) -> bytes:
-        return self._post("cat", params={"arg": _strip_ipfs_prefix(cid)})
+        return self._post("cat", params={"arg": _strip_ipfs_prefix(cid)}, timeout=120.0)
 
     def key_list(self) -> list[dict[str, str]]:
-        result = self._post_json("key/list")
+        result = self._post_json("key/list", timeout=30.0)
         return list(result.get("Keys") or [])
 
     def ensure_key(self, name: str = DIRECTMAIL_IPNS_KEY) -> str:
         for key in self.key_list():
             if key.get("Name") == name:
                 return key["Id"]
-        result = self._post_json("key/gen", params={"arg": name, "type": "ed25519"})
+        result = self._post_json(
+            "key/gen", params={"arg": name, "type": "ed25519"}, timeout=60.0
+        )
         kid = result.get("Id")
         if not kid:
             raise IpfsError(f"key/gen failed: {result}")
@@ -116,30 +122,73 @@ class IpfsClient:
     def name_publish(
         self, cid: str, *, key: str = DIRECTMAIL_IPNS_KEY, lifetime: str = "168h"
     ) -> str:
-        cid = _strip_ipfs_prefix(cid)
-        self.ensure_key(key)
-        result = self._post_json(
-            "name/publish",
-            params={
-                "arg": cid,
-                "key": key,
-                "lifetime": lifetime,
-                "allow-offline": "true",
-            },
-        )
-        name = result.get("Name")
-        if not name:
-            raise IpfsError(f"name/publish failed: {result}")
-        return f"/ipns/{name}"
+        """Publish IPNS without blocking on DHT.
 
-    def name_resolve(self, ipns_name: str, *, nocache: bool = True) -> str:
+        Kubo writes the local record quickly, then can hang for minutes
+        announcing to the DHT when many peers are connected. We return as
+        soon as local resolve sees the new CID; DHT finishes in a daemon thread.
+        """
+        cid = _strip_ipfs_prefix(cid)
+        key_id = self.ensure_key(key)
+        target = f"/ipfs/{cid}"
+        params = {
+            "arg": target,
+            "key": key,
+            "lifetime": lifetime,
+            "allow-offline": "true",
+            "resolve": "false",
+        }
+
+        errors: list[BaseException] = []
+
+        def _publish() -> None:
+            try:
+                self._post_json("name/publish", params=params, timeout=600.0)
+            except BaseException as exc:  # noqa: BLE001 — background best-effort
+                errors.append(exc)
+
+        thread = threading.Thread(target=_publish, name="ipns-publish", daemon=True)
+        thread.start()
+
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            try:
+                path = self.name_resolve(f"/ipns/{key_id}", nocache=True, timeout=3.0)
+                if _strip_ipfs_prefix(path) == cid or path.rstrip("/").endswith(cid):
+                    return f"/ipns/{key_id}"
+            except IpfsError:
+                pass
+            if not thread.is_alive() and errors:
+                raise IpfsError(f"name/publish failed: {errors[0]}") from errors[0]
+            if not thread.is_alive():
+                break
+            time.sleep(0.25)
+
+        try:
+            path = self.name_resolve(f"/ipns/{key_id}", nocache=True, timeout=3.0)
+            if _strip_ipfs_prefix(path) == cid or path.rstrip("/").endswith(cid):
+                return f"/ipns/{key_id}"
+        except IpfsError:
+            pass
+
+        if errors:
+            raise IpfsError(f"name/publish failed: {errors[0]}") from errors[0]
+        return f"/ipns/{key_id}"
+
+    def name_resolve(
+        self,
+        ipns_name: str,
+        *,
+        nocache: bool = True,
+        timeout: float = 30.0,
+    ) -> str:
         name = ipns_name.strip()
-        if not name.startswith("/ipns/") and not name.startswith("local://"):
+        if not name.startswith("/ipns/"):
             name = f"/ipns/{name}"
         params: dict[str, Any] = {"arg": name}
         if nocache:
             params["nocache"] = "true"
-        result = self._post_json("name/resolve", params=params)
+        result = self._post_json("name/resolve", params=params, timeout=timeout)
         path = result.get("Path")
         if not path:
             raise IpfsError(f"name/resolve failed: {result}")
@@ -153,7 +202,9 @@ class MemoryIpfsClient:
     Pass distinct ``key_name`` per mailbox (e.g. directmail-alice).
     """
 
-    def __init__(self, *, key_name: str = DIRECTMAIL_IPNS_KEY, share_with: MemoryIpfsClient | None = None) -> None:
+    def __init__(
+        self, *, key_name: str = DIRECTMAIL_IPNS_KEY, share_with: MemoryIpfsClient | None = None
+    ) -> None:
         if share_with is not None:
             self._blobs = share_with._blobs
             self._keys = share_with._keys
@@ -198,7 +249,10 @@ class MemoryIpfsClient:
         self._ipns[kid] = _strip_ipfs_prefix(cid)
         return f"/ipns/{kid}"
 
-    def name_resolve(self, ipns_name: str, *, nocache: bool = True) -> str:
+    def name_resolve(
+        self, ipns_name: str, *, nocache: bool = True, timeout: float = 30.0
+    ) -> str:
+        _ = timeout
         kid = _strip_ipfs_prefix(ipns_name)
         if kid not in self._ipns:
             raise IpfsError(f"unresolved: {ipns_name}")

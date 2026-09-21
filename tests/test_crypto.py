@@ -49,7 +49,8 @@ def test_contact_card_roundtrip():
 
 def test_contact_card_local_path_and_messy_paste():
     keys = generate_identity_keypair()
-    ipns = "local:///home/sam/.local/share/directmail/mailbox/outbox.json"
+    # Mailbox field may contain colons; pubkey is fixed-length at the end
+    ipns = "/ipns/k51qzi5uqu5dl9uswqvqvus32k4hu85hfdzw2jcmqmuk1c5s8s3"
     card = encode_card(handle="a@b", ipns=ipns, pubkey=keys.public_key_bytes)
     assert decode_card(card)[1] == ipns
     assert decode_card(f"hey\n{card}\n")[2] == keys.public_key_bytes
