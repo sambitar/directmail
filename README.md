@@ -38,12 +38,20 @@ cd directmail
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Terminal 1 — Kubo (HTTP API :5001)
-ipfs daemon
+# One-time: download Kubo into ./.tools/kubo (gitignored), then start it
+directmail ipfs install
+directmail ipfs start
 
-# Terminal 2
+# Terminal webmail (talks to Kubo HTTP API on :5001)
 directmail
 ```
+
+Kubo is **not** vendored in git — `directmail ipfs install` pulls the pinned release
+from GitHub into `.tools/` (or `$DIRECTMAIL_TOOLS`, or `~/.local/share/directmail/tools`
+when not running from a checkout). The IPFS repo itself lives under the data dir
+(`…/ipfs-repo`). Useful commands: `directmail ipfs status`, `directmail ipfs stop`.
+
+Already have a system Kubo on `:5001`? Skip install/start — Directmail will use it.
 
 Offline / single-box demo (no daemon):
 
@@ -62,7 +70,7 @@ There is no search. There is no “find friends on the mesh.” That is a featur
 1. Both of you create an identity: `user@hostname` + passphrase.
 2. Hit **a** (Contacts) → **y** / **Copy my card**.
 3. Paste the card to your peer (chat, USB, paper, carrier pigeon).
-4. They paste it into **Add someone** → **Add contact**. You do the same with theirs.
+4. They paste it into **Add someone** → **Save contact**. You do the same with theirs.
 5. **c** Compose → write a body → **Ctrl+Enter** Send.
 6. They open Inbox (or **r** Refresh). Mail appears. Decrypt happens locally.
 
@@ -157,7 +165,7 @@ Public metadata is intentional: who mailed whom, when, and a hash of **ciphertex
 |-------|------|
 | SQLite | Identity, contacts, inbox/sent index |
 | Keystore dir | Sealed identity private key |
-| Kubo HTTP API | `add` / `cat` / `name publish|resolve` |
+| Kubo HTTP API | `add` / `cat` / `name publish|resolve` (system or `directmail ipfs`) |
 | Textual | Webmail TUI |
 | `cryptography` | X25519, AES-GCM, Scrypt, HKDF |
 

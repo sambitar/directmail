@@ -1,7 +1,10 @@
 """Contact cards — the only first-contact mechanism.
 
 Format:
-  dm:v1:<handle>:<ipns_or_local>:<pubkey_b64url>
+  dm:v1:<handle>:<mailbox>:<pubkey_b64url>
+
+Pubkey is always 43 urlsafe-base64 chars (32 raw X25519 bytes, no padding).
+Mailbox may contain colons; we anchor on the fixed-length pubkey at the end.
 """
 
 from __future__ import annotations
@@ -14,6 +17,14 @@ from directmail.models import Contact, Identity
 
 CARD_PREFIX = "dm:v1"
 HANDLE_RE = re.compile(r"^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+$")
+# 32 bytes → 43 chars urlsafe b64 without padding
+PUBKEY_B64_LEN = 43
+CARD_EXTRACT_RE = re.compile(
+    rf"{re.escape(CARD_PREFIX)}:"
+    r"(?P<handle>[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+):"
+    r"(?P<mailbox>.+?):"
+    rf"(?P<pk>[A-Za-z0-9_-]{{{PUBKEY_B64_LEN}}})"
+)
 
 
 class CardError(ValueError):
@@ -46,7 +57,10 @@ def encode_card(*, handle: str, ipns: str, pubkey: bytes) -> str:
         raise CardError("IPNS / mailbox pointer required")
     if len(pubkey) != 32:
         raise CardError("Pubkey must be 32 raw X25519 bytes")
-    return f"{CARD_PREFIX}:{handle}:{ipns}:{b64url_encode(pubkey)}"
+    pk = b64url_encode(pubkey)
+    if len(pk) != PUBKEY_B64_LEN:
+        raise CardError("Internal error: unexpected pubkey encoding length")
+    return f"{CARD_PREFIX}:{handle}:{ipns}:{pk}"
 
 
 def encode_identity_card(identity: Identity) -> str:
@@ -58,29 +72,34 @@ def encode_identity_card(identity: Identity) -> str:
 
 
 def decode_card(card: str) -> tuple[str, str, bytes]:
-    raw = card.strip()
-    # Allow whitespace / newlines pasted from terminals
-    raw = "".join(raw.split())
-    parts = raw.split(":")
-    if len(parts) < 4 or f"{parts[0]}:{parts[1]}" != CARD_PREFIX:
+    # Drop whitespace/newlines from terminal wraps; keep extracting a full card
+    raw = "".join(card.strip().split())
+    match = CARD_EXTRACT_RE.search(raw)
+    if not match:
+        if raw.startswith(CARD_PREFIX) and ":" in raw:
+            tail = raw.rsplit(":", 1)[-1]
+            if tail and len(tail) != PUBKEY_B64_LEN:
+                raise CardError(
+                    f"Card looks truncated — pubkey is {len(tail)} chars, "
+                    f"need {PUBKEY_B64_LEN}. Use Copy my card and paste the "
+                    "entire string."
+                )
         raise CardError(
-            "Bad card — expected dm:v1:handle:ipns:pubkey "
-            "(copy from the other person's Me screen)"
+            "Bad card — expected dm:v1:handle:mailbox:pubkey "
+            "(copy from the other person's Contacts screen)"
         )
-    # ipns may contain colons rarely; pubkey is last, handle is parts[2],
-    # ipns is everything between handle and pubkey.
-    handle = validate_handle(parts[2])
-    pubkey_b64 = parts[-1]
-    ipns = ":".join(parts[3:-1])
-    if not ipns:
+
+    handle = validate_handle(match.group("handle"))
+    mailbox = match.group("mailbox")
+    if not mailbox:
         raise CardError("Missing mailbox pointer in card")
     try:
-        pubkey = b64url_decode(pubkey_b64)
+        pubkey = b64url_decode(match.group("pk"))
     except Exception as exc:
         raise CardError("Invalid pubkey encoding in card") from exc
     if len(pubkey) != 32:
         raise CardError("Pubkey must decode to 32 bytes")
-    return handle, ipns, pubkey
+    return handle, mailbox, pubkey
 
 
 def contact_from_card(card: str, *, added_at) -> Contact:

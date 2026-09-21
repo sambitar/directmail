@@ -256,6 +256,7 @@ ContactsScreen {
 
 #contacts-share .card-field {
     width: 100%;
+    height: 3;
     background: #0f1419;
     border: tall #2a3a4a;
     color: #c5d4e0;
@@ -278,8 +279,7 @@ ContactsScreen {
 
 #contacts-import {
     height: auto;
-    max-height: 14;
-    padding: 1 2;
+    padding: 1 2 1 2;
     background: #15202b;
     border-bottom: solid #2a3a4a;
 }
@@ -289,15 +289,27 @@ ContactsScreen {
 }
 
 #contacts-import #card-input {
-    height: 5;
+    height: 4;
+    min-height: 3;
     background: #0f1419;
     border: tall #3d7ea6;
     margin: 1 0;
     padding: 0 1;
 }
 
+#contacts-import-actions {
+    height: 3;
+    align: left middle;
+}
+
 #contacts-import-actions Button {
     margin-right: 1;
+    min-width: 16;
+}
+
+#contacts-import-actions .hint {
+    color: #6b7c8c;
+    width: 1fr;
 }
 
 #contacts-sheet #contact-list {
