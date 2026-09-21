@@ -38,26 +38,23 @@ cd directmail
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# One-time: download Kubo into ./.tools/kubo (gitignored), then start it
-directmail ipfs install
-directmail ipfs start
-
-# Terminal webmail (talks to Kubo HTTP API on :5001)
+# One command — downloads Kubo on first run if needed, starts the daemon, opens the TUI
 directmail
 ```
 
-Kubo is **not** vendored in git — `directmail ipfs install` pulls the pinned release
-from GitHub into `.tools/` (or `$DIRECTMAIL_TOOLS`, or `~/.local/share/directmail/tools`
-when not running from a checkout). The IPFS repo itself lives under the data dir
-(`…/ipfs-repo`). Useful commands: `directmail ipfs status`, `directmail ipfs stop`.
+You do **not** need to run `ipfs daemon` yourself. On launch, Directmail checks
+`http://127.0.0.1:5001` and, if nothing is there, installs Kubo under `.tools/`
+(or `$DIRECTMAIL_TOOLS` / `~/.local/share/directmail/tools`) and starts it.
 
-Already have a system Kubo on `:5001`? Skip install/start — Directmail will use it.
-
-Offline / single-box demo (no daemon):
+Optional helpers (only if you want to manage Kubo by hand):
 
 ```bash
-directmail --backend local
+directmail ipfs status
+directmail ipfs stop
+directmail ipfs start   # same autostart path the UI uses
 ```
+
+Already have a system Kubo on `:5001`? Directmail will use it and skip starting its own.
 
 Data lives in `~/.local/share/directmail` (override with `--data-dir` / `DIRECTMAIL_DATA`).
 
@@ -123,7 +120,7 @@ Paste once. SQLite remembers forever (until you don’t).
 
 1. Generate a random **AES-256** message key.
 2. Encrypt UTF-8 body with **AES-GCM**; AAD binds `message_id`, `from`, `to`.
-3. Put ciphertext on IPFS → `ipfs://<cid>` (or `local://` offline).
+3. Put ciphertext on IPFS → `ipfs://<cid>`.
 4. **Wrap** the message key to the recipient’s pubkey: ephemeral X25519 → HKDF-SHA256 → AES-GCM (AAD binds `message_id`).
 5. Append an envelope to your **outbox document** and **IPNS-publish** it.
 

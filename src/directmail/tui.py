@@ -383,18 +383,136 @@ class ContactsScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class ReadMessageScreen(ModalScreen[str | None]):
+    """Full-page message reader. Dismisses with None, or 'deleted' / 'reply'."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("d", "delete", "Delete"),
+        Binding("delete", "delete", "Delete", show=False),
+        Binding("r", "reply", "Reply"),
+    ]
+
+    def __init__(self, mail: MailService, message_id: str) -> None:
+        super().__init__()
+        self.mail = mail
+        self.message_id = message_id
+        self._msg: Message | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="read-sheet"):
+            with Horizontal(id="read-toolbar"):
+                yield Label("Message", id="read-title")
+                yield Static("  Enter/Esc close  ·  d delete  ·  r reply", id="read-meta")
+                yield Button("Close", id="close", compact=True)
+            yield Static(id="read-header")
+            with VerticalScroll(id="read-body-scroll"):
+                yield Static(id="read-body")
+            with Horizontal(id="read-actions"):
+                yield Button("Reply", variant="primary", id="reply", compact=True)
+                yield Button("Delete", variant="error", id="delete", compact=True)
+            yield Footer()
+
+    def on_mount(self) -> None:
+        try:
+            self._msg = self.mail.read_message(self.message_id)
+        except Exception as exc:
+            self.query_one("#read-header", Static).update("Error")
+            self.query_one("#read-body", Static).update(str(exc))
+            return
+        msg = self._msg
+        when = msg.created_at.strftime("%Y-%m-%d %H:%M:%S %Z")
+        self.query_one("#read-header", Static).update(
+            f"From: {msg.from_handle}\nTo:   {msg.to_handle}\nDate: {when}"
+        )
+        self.query_one("#read-body", Static).update(msg.body_plaintext or "")
+        # Reply only makes sense for inbox mail from a contact
+        if msg.folder == Folder.SENT:
+            self.query_one("#reply", Button).disabled = True
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#close")
+    def close_btn(self) -> None:
+        self.dismiss(None)
+
+    def action_delete(self) -> None:
+        self.dismiss("deleted")
+
+    @on(Button.Pressed, "#delete")
+    def delete_btn(self) -> None:
+        self.dismiss("deleted")
+
+    def action_reply(self) -> None:
+        if self._msg and self._msg.folder == Folder.INBOX:
+            self.dismiss("reply")
+
+    @on(Button.Pressed, "#reply")
+    def reply_btn(self) -> None:
+        self.action_reply()
+
+
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    BINDINGS = [
+        Binding("escape", "no", "Cancel"),
+        Binding("y", "yes", "Delete"),
+        Binding("n", "no", "Cancel"),
+    ]
+
+    def __init__(self, preview: str) -> None:
+        super().__init__()
+        self.preview = preview
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("Delete this message?")
+            yield Static(self.preview[:80] or "(empty)", id="confirm-preview")
+            yield Horizontal(
+                Button("Delete", variant="error", id="yes", compact=True),
+                Button("Cancel", id="no", compact=True),
+            )
+
+    @on(Button.Pressed, "#yes")
+    def yes_btn(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#no")
+    def no_btn(self) -> None:
+        self.dismiss(False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
+class FocusPane(Vertical):
+    """Pane that participates in Tab cycling."""
+
+    can_focus = True
+
+
 class MailScreen(Screen):
-    """Three-pane webmail: folders | list | reading."""
+    """Three-pane webmail: folders | list | preview. Enter opens full reader."""
 
     BINDINGS = [
         Binding("c", "compose", "Compose"),
         Binding("a", "contacts", "Contacts"),
         Binding("r", "refresh", "Refresh"),
-        Binding("j", "cursor_down", "Down", show=False),
-        Binding("k", "cursor_up", "Up", show=False),
-        Binding("tab", "focus_next", "Next pane", show=False),
-        Binding("shift+tab", "focus_previous", "Prev pane", show=False),
+        Binding("enter", "open_message", "Open"),
+        Binding("d", "delete_message", "Delete"),
+        Binding("delete", "delete_message", "Delete", show=False),
+        Binding("tab", "cycle_pane", "Next pane"),
+        Binding("shift+tab", "cycle_pane_back", "Prev pane"),
+        Binding("left", "pane_left", "Left pane", show=False),
+        Binding("right", "pane_right", "Right pane", show=False),
+        Binding("h", "pane_left", "Left pane", show=False),
+        Binding("l", "pane_right", "Right pane", show=False),
     ]
+
+    _PANE_IDS = ("folder-list", "message-table", "reading-pane")
 
     def __init__(self, mail: MailService) -> None:
         super().__init__()
@@ -403,6 +521,7 @@ class MailScreen(Screen):
         self._messages: list[Message] = []
         self._selected_id: str | None = None
         self._status_note = ""
+        self._pane_index = 1  # start on message list
 
     def compose(self) -> ComposeResult:
         identity = self.mail.store.get_identity()
@@ -418,8 +537,8 @@ class MailScreen(Screen):
                 )
             with Vertical(id="message-pane"):
                 yield DataTable(id="message-table", cursor_type="row", zebra_stripes=True)
-            with Vertical(id="reading-pane"):
-                yield Static("Select a message", id="reading-header")
+            with FocusPane(id="reading-pane"):
+                yield Static("Select a message — Enter to open", id="reading-header")
                 with VerticalScroll():
                     yield Static("", id="reading-body")
         yield Static(f"  {handle}", id="status-bar")
@@ -429,16 +548,34 @@ class MailScreen(Screen):
         table = self.query_one("#message-table", DataTable)
         table.add_columns("●", "From / To", "Preview", "When")
         table.focus()
+        self._pane_index = 1
         self.reload_list()
         identity = self.mail.store.get_identity()
         if identity:
             self.app.title = f"Directmail — {identity.handle}"
-        # Check contacts' outboxes once on open (like opening a webmail inbox)
         self.fetch_mail(quiet=True)
+
+    def _focus_pane(self, index: int) -> None:
+        self._pane_index = index % len(self._PANE_IDS)
+        wid = self._PANE_IDS[self._pane_index]
+        self.query_one(f"#{wid}").focus()
+
+    def action_cycle_pane(self) -> None:
+        self._focus_pane(self._pane_index + 1)
+
+    def action_cycle_pane_back(self) -> None:
+        self._focus_pane(self._pane_index - 1)
+
+    def action_pane_left(self) -> None:
+        self._focus_pane(self._pane_index - 1)
+
+    def action_pane_right(self) -> None:
+        self._focus_pane(self._pane_index + 1)
 
     def reload_list(self) -> None:
         """Redraw the message table from local SQLite only."""
         table = self.query_one("#message-table", DataTable)
+        prev = self._selected_id
         table.clear()
         self._messages = self.mail.list_messages(self.folder)
         for msg in self._messages:
@@ -453,6 +590,11 @@ class MailScreen(Screen):
                 Text(when, style=style),
                 key=msg.id,
             )
+        if prev and any(m.id == prev for m in self._messages):
+            try:
+                table.move_cursor(row=table.get_row_index(prev))
+            except Exception:  # noqa: BLE001
+                pass
         self._paint_status()
 
     def _paint_status(self) -> None:
@@ -467,7 +609,6 @@ class MailScreen(Screen):
         )
 
     def action_refresh(self) -> None:
-        """Check for new mail, then reload the list (one user-facing action)."""
         self.fetch_mail(quiet=False)
 
     @work(exclusive=True, thread=True)
@@ -494,51 +635,155 @@ class MailScreen(Screen):
         self._status_note = note
         self._paint_status()
 
+    def _current_message_id(self) -> str | None:
+        table = self.query_one("#message-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            row_key, _col = table.coordinate_to_cell_key(table.cursor_coordinate)
+        except Exception:  # noqa: BLE001
+            return self._selected_id
+        if row_key is None:
+            return self._selected_id
+        return str(row_key.value)
+
     @on(ListView.Selected, "#folder-list")
     def folder_selected(self, event: ListView.Selected) -> None:
         item_id = event.item.id
         if item_id == "folder-inbox":
             self.folder = Folder.INBOX
-            self.query_one("#reading-header", Static).update("Select a message")
-            self.query_one("#reading-body", Static).update("")
-            self.reload_list()
-            self.fetch_mail(quiet=True)
         elif item_id == "folder-sent":
             self.folder = Folder.SENT
-            self.query_one("#reading-header", Static).update("Select a message")
-            self.query_one("#reading-body", Static).update("")
-            self.reload_list()
-        self.query_one("#message-table", DataTable).focus()
+        else:
+            return
+        self._selected_id = None
+        self.query_one("#reading-header", Static).update(
+            "Select a message — Enter to open"
+        )
+        self.query_one("#reading-body", Static).update("")
+        self.reload_list()
+        if self.folder == Folder.INBOX:
+            self.fetch_mail(quiet=True)
+        self._focus_pane(1)
+
+    @on(ListView.Highlighted, "#folder-list")
+    def folder_highlighted(self, event: ListView.Highlighted) -> None:
+        # Arrowing in folders shouldn't require Enter to switch — update on highlight
+        if event.item is None:
+            return
+        item_id = event.item.id
+        new_folder = None
+        if item_id == "folder-inbox":
+            new_folder = Folder.INBOX
+        elif item_id == "folder-sent":
+            new_folder = Folder.SENT
+        if new_folder is None or new_folder == self.folder:
+            return
+        self.folder = new_folder
+        self._selected_id = None
+        self.query_one("#reading-header", Static).update(
+            "Select a message — Enter to open"
+        )
+        self.query_one("#reading-body", Static).update("")
+        self.reload_list()
 
     @on(DataTable.RowHighlighted, "#message-table")
     def row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is None:
             return
-        self._show_message(str(event.row_key.value))
+        self._selected_id = str(event.row_key.value)
+        self._preview_selected()
+
+    def _preview_selected(self) -> None:
+        """Side pane: metadata + preview only (no full decrypt / list reload)."""
+        mid = self._selected_id
+        if not mid:
+            return
+        msg = self.mail.store.get_message(mid)
+        if msg is None:
+            return
+        when = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        peer = msg.from_handle if msg.folder == Folder.INBOX else msg.to_handle
+        self.query_one("#reading-header", Static).update(
+            f"{'From' if msg.folder == Folder.INBOX else 'To'}: {peer}\n"
+            f"Date: {when}\n"
+            f"(Enter to open full message)"
+        )
+        snippet = msg.body_plaintext if msg.body_plaintext else msg.preview
+        self.query_one("#reading-body", Static).update(snippet or "")
 
     @on(DataTable.RowSelected, "#message-table")
     def row_selected(self, event: DataTable.RowSelected) -> None:
         if event.row_key is None:
             return
-        self._show_message(str(event.row_key.value))
+        self._selected_id = str(event.row_key.value)
+        self.action_open_message()
 
-    def _show_message(self, message_id: str) -> None:
-        self._selected_id = message_id
-        try:
-            msg = self.mail.read_message(message_id)
-        except Exception as exc:
-            self.query_one("#reading-header", Static).update("Error")
-            self.query_one("#reading-body", Static).update(str(exc))
+    def action_open_message(self) -> None:
+        mid = self._current_message_id()
+        if not mid:
+            self.notify("No message selected", severity="warning")
             return
-        when = msg.created_at.strftime("%Y-%m-%d %H:%M:%S %Z")
-        header = (
-            f"From: {msg.from_handle}\n"
-            f"To:   {msg.to_handle}\n"
-            f"Date: {when}"
-        )
-        self.query_one("#reading-header", Static).update(header)
-        self.query_one("#reading-body", Static).update(msg.body_plaintext or "")
-        self.reload_list()
+        self._selected_id = mid
+
+        def after(result: str | None) -> None:
+            if result == "deleted":
+                self._confirm_and_delete(mid)
+            elif result == "reply":
+                msg = self.mail.store.get_message(mid)
+                if msg:
+                    self._compose_reply(msg.from_handle)
+            self.reload_list()
+            self._preview_selected()
+
+        self.app.push_screen(ReadMessageScreen(self.mail, mid), after)
+
+    def action_delete_message(self) -> None:
+        mid = self._current_message_id()
+        if not mid:
+            self.notify("No message selected", severity="warning")
+            return
+        self._confirm_and_delete(mid)
+
+    def _confirm_and_delete(self, message_id: str) -> None:
+        msg = self.mail.store.get_message(message_id)
+        if msg is None:
+            return
+        preview = f"{msg.from_handle} → {msg.to_handle}: {msg.preview}"
+
+        def after(ok: bool | None) -> None:
+            if not ok:
+                return
+            try:
+                self.mail.delete_message(message_id)
+            except Exception as exc:
+                self.notify(str(exc), severity="error")
+                return
+            if self._selected_id == message_id:
+                self._selected_id = None
+                self.query_one("#reading-header", Static).update(
+                    "Select a message — Enter to open"
+                )
+                self.query_one("#reading-body", Static).update("")
+            self.notify("Message deleted")
+            self.reload_list()
+
+        self.app.push_screen(ConfirmDeleteScreen(preview), after)
+
+    def _compose_reply(self, to_handle: str) -> None:
+        contacts = [c.handle for c in self.mail.list_contacts()]
+        if to_handle not in contacts:
+            contacts = [to_handle, *contacts]
+
+        def done(result: tuple[str, str] | None) -> None:
+            if result is None:
+                return
+            to, body = result
+            self.notify(f"Sending to {to}…")
+            self._set_status_note("sending…")
+            self.send_mail(to, body)
+
+        self.app.push_screen(ComposeScreen(contacts, default_to=to_handle), done)
 
     def action_compose(self) -> None:
         contacts = [c.handle for c in self.mail.list_contacts()]
@@ -547,27 +792,30 @@ class MailScreen(Screen):
             if result is None:
                 return
             to, body = result
-            try:
-                self.mail.send(to, body)
-            except (CardError, Exception) as exc:
-                self.notify(str(exc), severity="error")
-                return
-            self.notify(f"Sent to {to}")
-            if self.folder == Folder.SENT:
-                self.reload_list()
+            self.notify(f"Sending to {to}…")
+            self._set_status_note("sending…")
+            self.send_mail(to, body)
 
         self.app.push_screen(ComposeScreen(contacts), done)
 
+    @work(exclusive=True, thread=True)
+    def send_mail(self, to: str, body: str) -> None:
+        try:
+            self.mail.send(to, body)
+        except Exception as exc:
+            self.app.call_from_thread(self._set_status_note, "send failed")
+            self.app.call_from_thread(self.notify, str(exc), severity="error")
+            return
+        self.app.call_from_thread(self._set_status_note, "sent")
+        self.app.call_from_thread(self.notify, f"Sent to {to}")
+        self.app.call_from_thread(self._after_send)
+
+    def _after_send(self) -> None:
+        if self.folder == Folder.SENT:
+            self.reload_list()
+
     def action_contacts(self) -> None:
         self.app.push_screen(ContactsScreen(self.mail), lambda _: None)
-
-    def action_cursor_down(self) -> None:
-        table = self.query_one("#message-table", DataTable)
-        table.action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        table = self.query_one("#message-table", DataTable)
-        table.action_cursor_up()
 
 
 class DirectmailApp(App[None]):
@@ -607,11 +855,28 @@ class DirectmailApp(App[None]):
             self.exit()
             return
         try:
+            before = None
+            ident = self.mail.store.get_identity()
+            if ident is not None:
+                before = ident.ipns
             self.mail.unlock(passphrase)
+            after = self.mail.store.get_identity()
+            migrated = bool(
+                before
+                and before.startswith("local://")
+                and after
+                and after.ipns
+                and after.ipns.startswith("/ipns/")
+            )
         except KeystoreAuthError:
             self.notify("Wrong passphrase", severity="error")
             self.push_screen(UnlockScreen(), self._after_unlock)
             return
+        if migrated:
+            self.notify(
+                "Migrated mailbox to IPFS — copy your card again (Contacts → y)",
+                timeout=8,
+            )
         self.push_screen(MailScreen(self.mail))
 
     def action_help(self) -> None:

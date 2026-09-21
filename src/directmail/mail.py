@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from directmail.blobs import HybridBlobStore, IpfsBlobStore, LocalBlobStore
+from directmail.blobs import IpfsBlobStore
 from directmail.cards import (
     CardError,
     contact_from_card,
@@ -50,29 +50,18 @@ def utcnow() -> datetime:
 
 
 class MailService:
-    def __init__(
-        self,
-        data_dir: str | Path,
-        *,
-        ipfs_client=None,
-        use_ipfs: bool = False,
-    ) -> None:
+    def __init__(self, data_dir: str | Path, *, ipfs_client) -> None:
+        if ipfs_client is None:
+            raise ValueError("ipfs_client is required — Directmail is IPFS-only")
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.data_dir / "mail.db")
         self.keystore = Keystore(self.data_dir / "keystore")
         self.ipfs = ipfs_client
-        self.use_ipfs = use_ipfs and ipfs_client is not None
-
-        local_blobs = LocalBlobStore(self.data_dir / "blobs")
-        ipfs_blobs = IpfsBlobStore(ipfs_client) if self.use_ipfs else None
-        self.blobs = HybridBlobStore(local_blobs, ipfs_blobs)
-
-        local_mail = self.data_dir / "mailbox"
-        self.mailbox = MailboxPublisher(
-            ipfs_client if self.use_ipfs else None,
-            local_fallback=local_mail,
-        )
+        self.blobs = IpfsBlobStore(ipfs_client)
+        self.mailbox = MailboxPublisher(ipfs_client)
+        # Legacy on-disk blobs from older local-backend installs (read-only migrate)
+        self._legacy_blobs = self.data_dir / "blobs"
 
     def close(self) -> None:
         self.store.close()
@@ -88,25 +77,51 @@ class MailService:
         handle = validate_handle(handle or default_handle())
         keys = generate_identity_keypair()
         self.keystore.initialize(passphrase, keys.private_key_bytes)
-        if self.use_ipfs:
-            # Prefer client-configured key (MemoryIpfs per-user); else default
-            ipns = self.ipfs.my_ipns()
-        else:
-            ipns = "local://outbox"
+        ipns = self.ipfs.my_ipns()
         identity = Identity(handle=handle, pubkey=keys.public_key_bytes, ipns=ipns)
         self.store.set_identity(identity)
-        # Publish empty outbox so card IPNS resolves / local path becomes absolute
         self._publish_outbox()
-        # Reload — publish may rewrite ipns pointer
         identity = self.store.get_identity()
         assert identity is not None
         return identity
+
     def unlock(self, passphrase: str) -> Identity:
         self.keystore.unlock(passphrase)
         identity = self.store.get_identity()
         if identity is None:
             raise KeystoreAuthError("No identity in database")
+        self.migrate_local_to_ipfs()
+        identity = self.store.get_identity()
+        assert identity is not None
         return identity
+
+    def migrate_local_to_ipfs(self) -> bool:
+        """One-shot: republish any leftover local:// blobs/mailbox onto IPFS."""
+        identity = self.store.get_identity()
+        if identity is None:
+            return False
+
+        changed = False
+        for folder in (Folder.SENT, Folder.INBOX):
+            for msg in self.store.list_messages(folder):
+                if not msg.body_cid.startswith("local://"):
+                    continue
+                name = msg.body_cid.removeprefix("local://")
+                path = self._legacy_blobs / name
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"Missing legacy blob {path} — cannot migrate message {msg.id}"
+                    )
+                new_cid = self.blobs.put(path.read_bytes(), filename=f"{msg.id}.enc")
+                self.store.set_body_cid(msg.id, new_cid)
+                changed = True
+
+        needs_ipns = not identity.ipns or identity.ipns.startswith("local://")
+        if needs_ipns or changed:
+            self.store.set_identity_ipns(self.ipfs.my_ipns())
+            self._publish_outbox()
+            return True
+        return False
 
     def require_unlocked(self) -> Identity:
         if not self.keystore.is_unlocked:
@@ -133,6 +148,11 @@ class MailService:
         me = self.store.get_identity()
         if me and contact.handle == me.handle:
             raise CardError("Cannot add yourself as a contact")
+        if contact.ipns.startswith("local://"):
+            raise CardError(
+                "That card still uses a local:// mailbox — ask them to reopen "
+                "Directmail (IPFS) and copy their card again"
+            )
         self.store.upsert_contact(contact)
         return contact
 
@@ -185,8 +205,20 @@ class MailService:
         self.require_unlocked()
         return self.store.list_messages(folder)
 
+    def delete_message(self, message_id: str) -> None:
+        """Remove a message locally; republish outbox if it was in Sent."""
+        self.require_unlocked()
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise KeyError(f"No message {message_id}")
+        was_sent = message.folder == Folder.SENT
+        if not self.store.delete_message(message_id):
+            raise KeyError(f"No message {message_id}")
+        if was_sent:
+            self._publish_outbox()
+
     def read_message(self, message_id: str) -> Message:
-        identity = self.require_unlocked()
+        self.require_unlocked()
         message = self.store.get_message(message_id)
         if message is None:
             raise KeyError(f"No message {message_id}")
@@ -206,8 +238,6 @@ class MailService:
         message.body_plaintext = plaintext
         message.read = True
         message.preview = plaintext.strip().replace("\n", " ")[:80]
-        # silence unused in local path
-        _ = identity
         return message
 
     def sync(self) -> int:
@@ -216,7 +246,7 @@ class MailService:
         imported = 0
         for contact in self.store.list_contacts():
             try:
-                raw = self._fetch_peer_outbox(contact)
+                raw = self.mailbox.resolve_outbox(contact.ipns)
             except Exception:
                 continue
             for env in parse_outbox_document(raw):
@@ -243,24 +273,6 @@ class MailService:
                 imported += 1
         return imported
 
-    def _fetch_peer_outbox(self, contact: Contact) -> bytes:
-        if contact.ipns.startswith("local://"):
-            # Local peer outbox lives under that peer's data dir when testing
-            # with shared MemoryIpfs — for single-machine local backend, peer
-            # cards use local://outbox relative to *their* data dir. Tests pass
-            # absolute local:// paths via card.
-            rel = contact.ipns.removeprefix("local://")
-            if rel in ("outbox", "outbox.json"):
-                raise FileNotFoundError(
-                    "Cannot sync local://outbox of another machine — use IPFS "
-                    "or a shared test path"
-                )
-            path = Path(rel)
-            if path.is_dir():
-                path = path / "outbox.json"
-            return path.read_bytes()
-        return self.mailbox.resolve_outbox(contact.ipns)
-
     def _publish_outbox(self) -> None:
         identity = self.store.get_identity()
         if identity is None:
@@ -284,13 +296,7 @@ class MailService:
             envelopes=envelopes,
         )
         published = self.mailbox.publish(doc)
-        if self.use_ipfs:
-            self.store.set_identity_ipns(published)
-        else:
-            # Keep stable local pointer
-            outbox_path = (self.data_dir / "mailbox" / "outbox.json").resolve()
-            ipns = f"local://{outbox_path}"
-            self.store.set_identity_ipns(ipns)
+        self.store.set_identity_ipns(published)
 
     def unread_count(self, folder: Folder = Folder.INBOX) -> int:
         return sum(1 for m in self.store.list_messages(folder) if not m.read)

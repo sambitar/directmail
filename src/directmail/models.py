@@ -16,7 +16,7 @@ class Folder(str, Enum):
 class Identity:
     handle: str
     pubkey: bytes
-    ipns: str | None  # set once IPFS mailbox key exists; local:// for local backend
+    ipns: str | None  # /ipns/… mailbox pointer
 
 
 @dataclass
@@ -35,7 +35,7 @@ class Message:
     from_handle: str
     to_handle: str
     created_at: datetime
-    body_cid: str  # ipfs://… or local://…
+    body_cid: str  # ipfs://…
     wrapped_key: bytes
     ciphertext_sha256: str
     preview: str

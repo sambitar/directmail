@@ -1,4 +1,4 @@
-"""Outbox mailbox publish / pull over IPFS (or local JSON for tests)."""
+"""Outbox mailbox publish / pull over IPFS + IPNS."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import base64
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 
@@ -70,37 +69,24 @@ def parse_outbox_document(raw: bytes) -> list[OutboxEnvelope]:
 
 
 class MailboxPublisher:
-    """Publishes the local outbox snapshot under our IPNS name."""
+    """Publishes the outbox snapshot under our IPNS name."""
 
-    def __init__(self, client, *, local_fallback: Path | None = None) -> None:
+    def __init__(self, client) -> None:
+        if client is None:
+            raise ValueError("IPFS client is required")
         self.client = client
-        self.local_fallback = local_fallback
-        if local_fallback is not None:
-            local_fallback.mkdir(parents=True, exist_ok=True)
 
     def publish(self, document: dict[str, Any]) -> str:
         raw = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        if self.client is None:
-            assert self.local_fallback is not None
-            path = self.local_fallback / "outbox.json"
-            path.write_bytes(raw)
-            return f"local://outbox"
         cid = self.client.add_bytes(raw, filename="outbox.json", pin=True)
         return self.client.name_publish(cid)
 
     def resolve_outbox(self, ipns: str) -> bytes:
         if ipns.startswith("local://"):
-            assert self.local_fallback is not None
-            # Peer local paths: for tests, Memory/shared dir uses peer folder name
-            # Convention: local://<peer_id>/outbox.json stored under fallback parent
-            rel = ipns.removeprefix("local://")
-            path = self.local_fallback / rel
-            if path.is_dir():
-                path = path / "outbox.json"
-            elif not path.name.endswith(".json"):
-                # local://outbox → outbox.json in fallback
-                path = self.local_fallback / "outbox.json"
-            return path.read_bytes()
+            raise FileNotFoundError(
+                f"Contact still uses a local:// mailbox ({ipns}) — they must "
+                "re-open Directmail with IPFS and share a new card"
+            )
         path = self.client.name_resolve(ipns)
         return self.client.cat(path)
 

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 from directmail.ipfs_client import IpfsClient
-from directmail.kubo import run_ipfs_command
+from directmail.kubo import KuboError, run_ipfs_command, start_daemon
 from directmail.mail import MailService
 from directmail.tui import run_tui
 
@@ -17,6 +18,38 @@ def default_data_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".local" / "share" / "directmail"
+
+
+def ensure_ipfs_client(*, api_url: str, data_dir: Path) -> IpfsClient:
+    """Ensure Kubo is reachable — download + start project-local daemon if needed.
+
+    Running ``directmail`` is enough; users should not need a separate
+    ``directmail ipfs start`` for normal use.
+    """
+    client = IpfsClient(api_url, timeout=3.0)
+    if client.is_available():
+        return client
+
+    print("Starting IPFS (Kubo) for Directmail…", file=sys.stderr)
+    try:
+        start_daemon(data_dir=data_dir, api_url=api_url, install_if_missing=True)
+    except KuboError as exc:
+        print(f"error: could not start IPFS: {exc}", file=sys.stderr)
+        print(
+            "  Manual recovery: directmail ipfs install && directmail ipfs start",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
+    client = IpfsClient(api_url, timeout=5.0)
+    if not client.is_available():
+        print(
+            f"error: IPFS still unreachable at {api_url} after start",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print("IPFS ready.", file=sys.stderr)
+    return client
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -29,12 +62,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=default_data_dir(),
         help="Local data directory (default: ~/.local/share/directmail)",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=("ipfs", "local"),
-        default=os.environ.get("DIRECTMAIL_BACKEND", "ipfs"),
-        help="ipfs (default) or local blobs/outbox for offline demos",
     )
     parser.add_argument(
         "--ipfs-api",
@@ -62,22 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_ui(args: argparse.Namespace) -> None:
-    ipfs = None
-    use_ipfs = False
-    if args.backend == "ipfs":
-        ipfs = IpfsClient(args.ipfs_api)
-        if ipfs.is_available():
-            use_ipfs = True
-        else:
-            print(
-                "IPFS daemon not reachable — falling back to local backend.\n"
-                f"  Tried {args.ipfs_api}.\n"
-                "  Fix:  directmail ipfs install && directmail ipfs start\n"
-                "  Or:   pass --backend local for an offline single-box demo."
-            )
-            ipfs = None
-
-    mail = MailService(args.data_dir, ipfs_client=ipfs, use_ipfs=use_ipfs)
+    ipfs = ensure_ipfs_client(api_url=args.ipfs_api, data_dir=args.data_dir)
+    mail = MailService(args.data_dir, ipfs_client=ipfs)
     try:
         run_tui(mail)
     finally:
@@ -97,7 +110,6 @@ def main(argv: list[str] | None = None) -> None:
         )
         raise SystemExit(code)
 
-    # Default / explicit ui
     _run_ui(args)
 
 

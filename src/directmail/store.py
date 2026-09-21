@@ -242,6 +242,14 @@ class Store:
         self._conn.commit()
 
     @_locked
+    def set_body_cid(self, message_id: str, body_cid: str) -> None:
+        self._conn.execute(
+            "UPDATE messages SET body_cid = ? WHERE id = ?",
+            (body_cid, message_id),
+        )
+        self._conn.commit()
+
+    @_locked
     def set_body_plaintext(self, message_id: str, body: str) -> None:
         preview = body.strip().replace("\n", " ")[:80]
         self._conn.execute(
@@ -253,6 +261,12 @@ class Store:
             (body, preview, message_id),
         )
         self._conn.commit()
+
+    @_locked
+    def delete_message(self, message_id: str) -> bool:
+        cur = self._conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
 
     @_locked
     def has_message(self, message_id: str) -> bool:
